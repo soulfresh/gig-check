@@ -1,4 +1,19 @@
 {
   "name": "gig-check",
-  "packageManager": "yarn@4.5.2"
+  "packageManager": "yarn@4.5.2",
+  "scripts": {
+    "gig-check": "tsx src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.14",
+    "@types/yargs": "^17.0.33",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "ora": "^8.2.0",
+    "puppeteer": "^24.8.1",
+    "yargs": "^17.7.2"
+  }
 }
