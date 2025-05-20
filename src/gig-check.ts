@@ -222,7 +222,7 @@ export async function search(
   });
 
   // Get the summaries of all events
-  const rawEvents = await loadAllEventSummaries(
+  const sites = await loadAllEventSummaries(
     band.websiteConfigs,
     previous,
     browser,
@@ -235,7 +235,7 @@ export async function search(
   // we remove before writing the event data.
   // TODO Pass some utility functions like trimWhitespace to the browser context
   // so we can do this in the browser.
-  const sites = cleanUpEventSummaries(rawEvents);
+  // const sites = cleanUpEventSummaries(rawEvents);
 
   // Transfer the previously discovered relevance scores to the new data.
   // This will also remove any expired events.

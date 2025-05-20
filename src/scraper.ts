@@ -37,8 +37,10 @@ async function loadNextPage(
   site: WebsiteConfig,
   timeout: number,
   depth = 0,
-  maxDepth = 3,
-  maxDate?: Date,
+  maxDepth = 6,
+  // TODO Max date parameter? If I add this, then we should make the maxDepth a
+  // larger number (12?)
+  // maxDate?: Date,
 ) {
   spinner.suffixText = `: page ${depth + 1}`;
   // Wait for the event container to load
@@ -85,17 +87,21 @@ async function loadNextPage(
   // iterations. Some websites have endless repeating events and we don't want
   // to get stuck in an infinite loop.
   const depthExceeded = maxDepth == null ? false : depth >= maxDepth;
-  const dateExceeded =
-    maxDate == null
-      ? false
-      : results.some((event) => {
-          return false;
-          const eventDate = new Date(event.date || "");
-          return isNaN(eventDate.getTime()) || eventDate > maxDate!;
-        });
+  // const dateExceeded =
+  //   maxDate == null
+  //     ? false
+  //     : results.some((event) => {
+  //         return false;
+  //         const eventDate = new Date(event.date || "");
+  //         return isNaN(eventDate.getTime()) || eventDate > maxDate!;
+  //       });
 
   // Check if there is a "load more" button
-  if (site.selectors.loadMoreLink && !depthExceeded && !dateExceeded) {
+  if (
+    site.selectors.loadMoreLink &&
+    !depthExceeded
+    // && !dateExceeded
+  ) {
     const nextDepth = depth + 1;
     // spinner.start(`Loading next page: ${nextDepth}`);
 
@@ -168,7 +174,7 @@ async function loadNextPage(
           timeout,
           nextDepth,
           maxDepth,
-          maxDate,
+          // maxDate,
         );
         results = [...results, ...moreResults.results];
         errors = [...errors, ...moreResults.errors];
@@ -250,6 +256,10 @@ async function getEventDetails(
   band: BandConfig,
   limit = 5,
   timeout = 10000,
+  /**
+   * A list of strings to filter out events that are not relevant.
+   */
+  filter = [/private event/i, /cancelled/i, /postponed/i],
 ) {
   if (!eventSummaries.events?.length) {
     spinner.info(
@@ -286,6 +296,8 @@ async function getEventDetails(
     // start from the wrong offset, this prevents us from needlessly looking up
     // data we already have.
     if (event.relevance) continue;
+    // Skip any events that match our filter.
+    if (filter.some((f) => f.test(event.name || ""))) continue;
 
     // If it's a two page selector, we need to load the detail page to get the
     // event description.

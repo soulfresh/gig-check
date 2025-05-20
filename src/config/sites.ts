@@ -98,4 +98,5 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
   // 9:30
   // blackcat
   // hank dietle's tavern
+  // bossa
 };
