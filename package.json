@@ -2,7 +2,8 @@
   "name": "gig-check",
   "packageManager": "yarn@4.5.2",
   "scripts": {
-    "gig-check": "tsx src/index.ts"
+    "gig-check": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^22.15.14",
