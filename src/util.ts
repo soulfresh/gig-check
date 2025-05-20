@@ -1,10 +1,14 @@
-import { EventsResult } from "./types";
+import { EventsResult, Nilable } from "./types";
 
 /**
  * Replace multiple whitespace characters with a single space and trim it.
  */
-export function normalizeWhitespace(input: string): string {
-  return input.replace(/\s+/g, " ").trim();
+export function normalizeWhitespace(input: Nilable<string>): string {
+  if (typeof input === "string") {
+    return input.replace(/\s+/g, " ").trim();
+  } else {
+    return "";
+  }
 }
 
 export function countEvents(events: EventsResult[]) {
@@ -12,6 +16,15 @@ export function countEvents(events: EventsResult[]) {
     const count = site.events?.length ?? 0;
     return acc + count;
   }, 0);
+}
+
+export function isElementVisible(element: Element): boolean {
+  const o = window.getComputedStyle(element).opacity;
+  if (typeof o === "string") {
+    return parseFloat(o) > 10;
+  } else {
+    return true;
+  }
 }
 
 /**

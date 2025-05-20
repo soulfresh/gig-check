@@ -64,7 +64,7 @@ const argv = yargs(hideBin(process.argv))
     alias: "l",
     demandOption: false,
     type: "number",
-    default: 5,
+    default: 40,
     description: "Limit the number of gig details to check for each site.",
   })
   .option("debug", {

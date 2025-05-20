@@ -42,9 +42,18 @@ export interface SinglePageSiteSelector {
    */
   name: string;
   /**
-   * A link to load additional events.
+   * A link to load additional events. If this is specified, then it is expected
+   * that the page has a "load more" button that will load more events when
+   * pressed.
    */
-  loadMore?: string;
+  loadMoreLink?: string;
+  /**
+   * A selector to determine if the page is currently loading more events. When
+   * this is added and then remove, the "load more" event is considered to be
+   * complete. If this is not specified, then the number of events on the page
+   * will be tracked to determine when the page has finished loading.
+   */
+  loadMoreLoader?: string;
 }
 
 /**
@@ -84,6 +93,15 @@ export interface Event {
    * our genres.
    */
   relevance: Nilable<string[]>;
+  /**
+   * The page number on which the event was found. Or in the case of an infinite
+   * scroll page, the number of times "load more" was triggered.
+   */
+  page: number;
+  /**
+   * Whether or not there were any errors scraping the event.
+   */
+  errors?: string[];
 }
 
 export interface EventsResult {

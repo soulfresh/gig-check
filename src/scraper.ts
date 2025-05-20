@@ -1,5 +1,5 @@
 import util from "node:util";
-import { Browser, Page } from "puppeteer";
+import { Browser, ElementHandle, Page } from "puppeteer";
 import {
   Nilable,
   EventsResult,
@@ -9,7 +9,12 @@ import {
   TwoPageSiteSelector,
 } from "./types";
 import chalk from "chalk";
-import { countEvents, findTextSnippets } from "./util";
+import {
+  countEvents,
+  findTextSnippets,
+  isElementVisible,
+  normalizeWhitespace,
+} from "./util";
 import { spinner } from "./spinner";
 
 function determineShowRelevance(terms: string[], description: string) {
@@ -30,18 +35,29 @@ function isTwoPageSiteSelector(
 async function loadNextPage(
   page: Page,
   site: WebsiteConfig,
-  loadedSelector: string,
+  timeout: number,
+  depth = 0,
+  maxDepth = 3,
+  maxDate?: Date,
 ) {
+  spinner.suffixText = `: page ${depth + 1}`;
   // Wait for the event container to load
-  await page.waitForSelector(loadedSelector);
+  await page.waitForSelector(site.selectors.event, { timeout });
 
-  const results = await page.$$eval(
+  let errors: unknown[] = [];
+  let results = await page.$$eval(
     site.selectors.event,
-    (elements, selectors) => {
+    (elements, selectors, page) => {
       const out = elements.map((el) => {
         const out = {
-          name: el.querySelector(selectors.name)?.textContent?.trim(),
-          date: el.querySelector(selectors.date)?.textContent?.trim(),
+          name: el
+            .querySelector(selectors.name)
+            ?.textContent?.replace(/\s+/g, " ")
+            .trim(),
+          date: el
+            .querySelector(selectors.date)
+            ?.textContent?.replace(/\s+/g, " ")
+            .trim(),
           // Cannot use `isTwoPageSiteSelector` here because it is not
           // available in the browser.
           detailLink: (selectors as any).detailLink
@@ -55,39 +71,112 @@ async function loadNextPage(
             ? null
             : el?.textContent?.trim(),
           relevance: null,
+          page,
         };
         return out;
       });
       return out;
     },
     site.selectors,
+    depth,
   );
 
-  // TODO Madam's Organ has a load more button but using it is going to be a bit
-  // of a pain. I would need to wait for the number of events on the page to
-  // increase or watch the button for the load indicator to be removed
-  // (.mec-load-more-loading).
-  // if (site.selectors.loadMore) {
-  //   const lastEventDate = results.at(-1)?.date;
-  //   if (lastEventDate) {
-  //     const date = new Date(lastEventDate);
-  //     if (!isNaN(date.getTime())) {
-  //       const loadMoreButton = await page.$(site.selectors.loadMore);
-  //       if (loadMoreButton) {
-  //         await loadMoreButton.click();
-  //         await page.waitForSelector(loadedSelector, { timeout: 10000 });
-  //         const moreResults = await loadNextPage(page, site, loadedSelector);
-  //         return [...results, ...moreResults];
-  //       } else {
-  //         console.log(
-  //           `No more events found for ${site.url} on ${lastEventDate}`,
-  //         );
-  //       }
-  //     }
-  //   }
-  // }
+  // Whether we've gone too far into the future or done too many resursive
+  // iterations. Some websites have endless repeating events and we don't want
+  // to get stuck in an infinite loop.
+  const depthExceeded = maxDepth == null ? false : depth >= maxDepth;
+  const dateExceeded =
+    maxDate == null
+      ? false
+      : results.some((event) => {
+          return false;
+          const eventDate = new Date(event.date || "");
+          return isNaN(eventDate.getTime()) || eventDate > maxDate!;
+        });
 
-  return results;
+  // Check if there is a "load more" button
+  if (site.selectors.loadMoreLink && !depthExceeded && !dateExceeded) {
+    const nextDepth = depth + 1;
+    // spinner.start(`Loading next page: ${nextDepth}`);
+
+    let loadMoreButton: ElementHandle<Element> | null = null;
+    try {
+      loadMoreButton = await page.$(site.selectors.loadMoreLink);
+    } catch (error) {
+      spinner.fail(`Unable to find load more button at depth ${nextDepth}`);
+      errors.push(`Could not find load more button on ${site.url}`);
+    }
+
+    if (loadMoreButton) {
+      let visible = await loadMoreButton?.isVisible();
+      if (visible) {
+        visible = await loadMoreButton?.evaluate((el) => {
+          const o = window.getComputedStyle(el).opacity;
+          if (typeof o === "string") {
+            return parseFloat(o) > 0;
+          } else {
+            return true;
+          }
+        });
+      }
+
+      if (visible) {
+        const initialEventCount = results.length;
+
+        // Click the "load more" button
+        await loadMoreButton.click();
+
+        if (site.selectors.loadMoreLoader) {
+          try {
+            // Wait for the loader to appear and then disappear
+            await page.waitForSelector(site.selectors.loadMoreLoader, {
+              visible: true,
+              timeout,
+            });
+            await page.waitForSelector(site.selectors.loadMoreLoader, {
+              hidden: true,
+              timeout,
+            });
+          } catch (e) {
+            errors.push(
+              `Error waiting for load more loader on ${site.url}: ${e}`,
+            );
+            // spinner.fail(`Unable to detect load end at depth ${nextDepth}`);
+          }
+        } else {
+          try {
+            // Wait for the number of events to increase
+            await page.waitForFunction(
+              (selector, count) =>
+                document.querySelectorAll(selector).length > count,
+              {},
+              site.selectors.event,
+              initialEventCount,
+            );
+          } catch (e) {
+            errors.push(
+              `Error waiting for more events to load on ${site.url}: ${e}`,
+            );
+            // spinner.fail(`Unable to detect new events at depth ${nextDepth}`);
+          }
+        }
+
+        // Recursively load the next page of events
+        const moreResults = await loadNextPage(
+          page,
+          site,
+          timeout,
+          nextDepth,
+          maxDepth,
+          maxDate,
+        );
+        results = [...results, ...moreResults.results];
+        errors = [...errors, ...moreResults.errors];
+      }
+    }
+  }
+
+  return { results, errors };
 }
 
 /**
@@ -96,13 +185,9 @@ async function loadNextPage(
 async function getEventSummariesFromWebsite(
   browser: Browser,
   site: WebsiteConfig,
+  timeout: number,
   _previous: Nilable<EventsResult>,
 ) {
-  // const hasAllRelevance = !!previous
-  //   ? previous.events?.every((e) => e.relevance !== null)
-  //   : false;
-  // const fetchMore = hasAllRelevance && site.selectors.loadMore;
-
   const output: EventsResult = {
     url: site.url,
     events: [],
@@ -110,43 +195,25 @@ async function getEventSummariesFromWebsite(
   };
   const page = await browser.newPage();
 
+  // page.exposeFunction("__normalizeWhitespace", normalizeWhitespace);
+  // page.exposeFunction("__isElementVisible", isElementVisible);
+
   try {
     await page.goto(site.url, { waitUntil: "networkidle2" });
 
-    const results = await loadNextPage(page, site, site.selectors.event);
+    spinner.start(`${chalk.yellow(site.url)}`);
+    const results = await loadNextPage(page, site, timeout);
+    if (results.errors.length > 0) {
+      spinner.fail(
+        `${chalk.yellow(site.url)} Unable to detect load all events`,
+      );
+    } else {
+      spinner.succeed();
+    }
+    spinner.suffixText = "";
 
-    // // Wait for the event container to load
-    // await page.waitForSelector(site.selectors.event);
-    //
-    // const results = await page.$$eval(
-    //   site.selectors.event,
-    //   (elements, selectors) => {
-    //     const out = elements.map((el) => {
-    //       const out = {
-    //         name: el.querySelector(selectors.name)?.textContent?.trim(),
-    //         date: el.querySelector(selectors.date)?.textContent?.trim(),
-    //         // Cannot use `isTwoPageSiteSelector` here because it is not
-    //         // available in the browser.
-    //         detailLink: (selectors as any).detailLink
-    //           ? el
-    //               .querySelector((selectors as any).detailLink)
-    //               ?.getAttribute("href")
-    //           : null,
-    //         // Cannot use `isTwoPageSiteSelector` here because it is not
-    //         // available in the browser.
-    //         description: (selectors as any).detailLink
-    //           ? null
-    //           : el?.textContent?.trim(),
-    //         relevance: null,
-    //       };
-    //       return out;
-    //     });
-    //     return out;
-    //   },
-    //   site.selectors,
-    // );
-
-    output.events = results;
+    output.events = results.results;
+    output.errors = results.errors;
   } catch (error) {
     console.error(
       `Error fetching events from ${chalk.yellow(site.url)}:`,
@@ -191,7 +258,9 @@ async function getEventDetails(
     return { site: eventSummaries, count: 0, errorCount: 0 };
   }
 
-  const offset = eventSummaries.events.findIndex((e) => e.relevance == null);
+  const offset = eventSummaries.events.findIndex(
+    (e) => e.relevance == null && e.errors == null,
+  );
   if (offset == -1) {
     spinner.info(
       `All events already have relevance scores for site ${chalk.yellow(eventSummaries.url)}`,
@@ -213,6 +282,11 @@ async function getEventDetails(
   for (let index = offset; index < end; index++) {
     const event = eventSummaries.events![index];
     if (!event) throw new Error("Event not found for index " + index);
+    // If the relevance info is already set, skip this event. In the case that we
+    // start from the wrong offset, this prevents us from needlessly looking up
+    // data we already have.
+    if (event.relevance) continue;
+
     // If it's a two page selector, we need to load the detail page to get the
     // event description.
     if (isTwoPageSiteSelector(websiteConfig.selectors)) {
@@ -296,24 +370,26 @@ async function getEventDetails(
             descriptions.join("\n"),
           );
           spinner.info(`Retrieved event ${chalk.green(event.name)}`);
+          page.close();
           continue;
         } else {
           errorCount++;
-          eventSummaries.errors = [
-            ...(eventSummaries.errors ?? []),
-            `No description found for event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}`,
-          ];
+          const message = `No description found for event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}`;
+          eventSummaries.errors = [...(eventSummaries.errors ?? []), message];
+          event.errors = [...(event.errors ?? []), message];
           spinner.fail(
             `No description found for event ${chalk.red(event.name)}`,
           );
+          page.close();
           continue;
         }
       } catch (error) {
         errorCount++;
         eventSummaries.errors = [
           ...(eventSummaries.errors ?? []),
-          `Error fetching event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}: ${error}`,
+          `Error fetching event (${index}) ${event.name} on ${event.date} at ${event.detailLink ?? eventSummaries.url}: ${error}`,
         ];
+        event.errors = [...(event.errors ?? []), String(error)];
         spinner.fail(
           `Error fetching event ${chalk.red(event.name)} (see errors below)`,
         );
@@ -352,17 +428,23 @@ export async function loadAllEventSummaries(
   websiteConfigs: WebsiteConfig[],
   previous: EventsResult[],
   browser: Browser,
+  timeout: number,
 ) {
   const sites: EventsResult[] = [];
   for (const site of websiteConfigs) {
     const prev = previous.find((s) => s.url === site.url);
 
-    spinner.start(`Fetching events from: ${chalk.green(site.url)}`);
-    const data = await getEventSummariesFromWebsite(browser, site, prev);
+    spinner.info(`Fetching events from: ${chalk.green(site.url)}`);
+    const data = await getEventSummariesFromWebsite(
+      browser,
+      site,
+      timeout,
+      prev,
+    );
     sites.push(data);
-    spinner.succeed(`Fetched events from: ${chalk.green(site.url)}`);
+    spinner.succeed(`Finished fetching events from: ${chalk.green(site.url)}`);
   }
-  console.log(util.inspect(sites, { colors: true, depth: null }));
+  // console.log(util.inspect(sites, { colors: true, depth: null }));
 
   const loadErrorCount = sites.reduce(
     (count, site) => count + (site.errors?.length ?? 0),

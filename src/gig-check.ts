@@ -56,8 +56,9 @@ function updateRelevance(sites: EventsResult[], previous: EventsResult[]) {
       );
       if (previousEvent) {
         event.relevance = previousEvent.relevance;
-      } else {
-        console.log("unable to find previous event for ", event);
+        event.errors = previousEvent.errors;
+        // } else {
+        //   console.log("unable to find previous event for ", event);
       }
     }
   }
@@ -204,6 +205,12 @@ export async function search(
   debug = false,
 ) {
   console.log(chalk.blue("Starting gig search..."));
+  console.log(
+    util.inspect(
+      { band: band.name, sites: band.sites, file, limit, timeout },
+      { colors: true, depth: null },
+    ),
+  );
 
   // Get the data from the previous runs.
   const previous = await getPreviousData(file);
@@ -219,6 +226,7 @@ export async function search(
     band.websiteConfigs,
     previous,
     browser,
+    timeout,
   );
 
   // Clean up the event summar so that event fields can be matched against the

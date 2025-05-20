@@ -47,7 +47,7 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
       date: ".mec-date-details",
       name: ".mec-event-title",
       detailLink: ".mec-booking-button",
-      loadMore: ".mec-load-more-button",
+      loadMoreLink: ".mec-load-more-button",
       description: [
         {
           domain: "madamsorgan.com",
@@ -63,7 +63,7 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
       name: ".title",
       date: ".date",
       detailLink: ".title a",
-      loadMore: "#loadMoreEvents",
+      loadMoreLink: "#loadMoreEvents",
       description: [
         {
           domain: "ramsheadonstage.com",
@@ -82,6 +82,8 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
       name: ".listing__title",
       date: ".listingDateTime",
       detailLink: ".listing__titleLink",
+      loadMoreLink: "a.pagination-next",
+      loadMoreLoader: ".listings-block .loading",
       description: [
         {
           domain: "dc9.club",
