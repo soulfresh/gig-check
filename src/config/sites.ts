@@ -48,6 +48,7 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
       name: ".mec-event-title",
       detailLink: ".mec-booking-button",
       loadMoreLink: ".mec-load-more-button",
+      loadMoreLoader: ".mec-load-more-button.mec-load-more-loading",
       description: [
         {
           domain: "madamsorgan.com",
@@ -73,9 +74,6 @@ export const websiteConfig: Record<string, WebsiteConfig> = {
     },
   },
   dc9: {
-    // TODO The details page contains a lineup list where each artist has a link
-    // to the artist bio. Will need to click into the bio to get their
-    // description.
     url: "https://dc9.club/events/",
     selectors: {
       event: ".listing__details",

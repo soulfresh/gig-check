@@ -27,6 +27,18 @@ export function isElementVisible(element: Element): boolean {
   }
 }
 
+export function testStringOrRegex(
+  str: string,
+  searchTerms: string | RegExp,
+): boolean {
+  if (typeof searchTerms === "string") {
+    return str.toLowerCase().includes(searchTerms.toLowerCase());
+  } else if (searchTerms instanceof RegExp) {
+    return searchTerms.test(str);
+  }
+  return false;
+}
+
 /**
  * Search the given string for the given search terms and return snippets of
  * text that contain those search terms.
@@ -34,7 +46,7 @@ export function isElementVisible(element: Element): boolean {
 export function findTextSnippets(
   text: string,
   searchTerms: string[],
-  contextLength: number,
+  contextLength: number = 100,
 ): string[] {
   const snippets: string[] = [];
 

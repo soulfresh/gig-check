@@ -7,6 +7,8 @@ import {
   BandConfig,
   Selectors,
   TwoPageSiteSelector,
+  Event,
+  TwoPageWebsiteConfig,
 } from "./types";
 import chalk from "chalk";
 import {
@@ -14,18 +16,23 @@ import {
   findTextSnippets,
   isElementVisible,
   normalizeWhitespace,
+  testStringOrRegex,
 } from "./util";
 import { spinner } from "./spinner";
 
 function determineShowRelevance(terms: string[], description: string) {
   // TODO make this a commandline parameter
-  return findTextSnippets(description, terms, 50);
+  return findTextSnippets(description, terms);
 }
 
 function isTwoPageSiteSelector(
   selectors: Selectors,
 ): selectors is TwoPageSiteSelector {
   return (selectors as any).detailLink != null;
+}
+
+function getEventId(event: Event) {
+  return `${event.name}-${event.date}`;
 }
 
 /**
@@ -36,6 +43,12 @@ async function loadNextPage(
   page: Page,
   site: WebsiteConfig,
   timeout: number,
+  /**
+   * A list of event `name-date` strings that have already been discovered. This
+   * is used to prevent duplicates from getting added to the list of events in
+   * the case that the page uses infinite scroll.
+   */
+  discoveredEvents: string[] = [],
   depth = 0,
   maxDepth = 6,
   // TODO Max date parameter? If I add this, then we should make the maxDepth a
@@ -46,8 +59,12 @@ async function loadNextPage(
   // Wait for the event container to load
   await page.waitForSelector(site.selectors.event, { timeout });
 
+  // TODO We need to make sure this doesn't add the same events multiple times.
+  // In the case of a pageinated page this is working fine. In the cate of an
+  // infinite scroll page, the events from the first page are re-added on every
+  // subsequent "load more".
   let errors: unknown[] = [];
-  let results = await page.$$eval(
+  let resultsOnPage = await page.$$eval(
     site.selectors.event,
     (elements, selectors, page) => {
       const out = elements.map((el) => {
@@ -103,7 +120,6 @@ async function loadNextPage(
     // && !dateExceeded
   ) {
     const nextDepth = depth + 1;
-    // spinner.start(`Loading next page: ${nextDepth}`);
 
     let loadMoreButton: ElementHandle<Element> | null = null;
     try {
@@ -127,7 +143,7 @@ async function loadNextPage(
       }
 
       if (visible) {
-        const initialEventCount = results.length;
+        const initialEventCount = resultsOnPage.length;
 
         // Click the "load more" button
         await loadMoreButton.click();
@@ -147,7 +163,6 @@ async function loadNextPage(
             errors.push(
               `Error waiting for load more loader on ${site.url}: ${e}`,
             );
-            // spinner.fail(`Unable to detect load end at depth ${nextDepth}`);
           }
         } else {
           try {
@@ -163,26 +178,37 @@ async function loadNextPage(
             errors.push(
               `Error waiting for more events to load on ${site.url}: ${e}`,
             );
-            // spinner.fail(`Unable to detect new events at depth ${nextDepth}`);
           }
         }
+
+        // Filter out events we've seen before.
+        const newEvents = resultsOnPage.filter(
+          (event) => !discoveredEvents.includes(getEventId(event)),
+        );
+        const eventIds = [
+          ...discoveredEvents,
+          ...newEvents.map((e) => getEventId(e)),
+        ];
 
         // Recursively load the next page of events
         const moreResults = await loadNextPage(
           page,
           site,
           timeout,
+          eventIds,
           nextDepth,
           maxDepth,
           // maxDate,
         );
-        results = [...results, ...moreResults.results];
-        errors = [...errors, ...moreResults.errors];
+        resultsOnPage = moreResults.results;
+        errors = moreResults.errors;
+        // resultsOnPage = [...newEvents, ...moreResults.results];
+        // errors = [...errors, ...moreResults.errors];
       }
     }
   }
 
-  return { results, errors };
+  return { results: resultsOnPage, errors };
 }
 
 /**
@@ -234,6 +260,136 @@ async function getEventSummariesFromWebsite(
 }
 
 /**
+ * Load the event details page for the given event summary. This will also look
+ * up the artist lineup bios if the website supports it.
+ */
+async function getEventDetailsFromPage(
+  browser: Browser,
+  band: BandConfig,
+  websiteConfig: TwoPageWebsiteConfig,
+  event: Event,
+  eventSummaries: EventsResult,
+  index: number,
+  timeout: number,
+) {
+  let errorCount = 0;
+  try {
+    // Find the selector for the given link.
+    const selector = websiteConfig.selectors.description.find((s) =>
+      event.detailLink?.includes(s.domain),
+    );
+
+    if (!selector) {
+      eventSummaries.errors = [
+        ...(eventSummaries.errors ?? []),
+        `Counld not find a description selector for event (${index}) ${event.name} on ${event.date} at ${event.detailLink}`,
+      ];
+      spinner.fail(
+        `Could not find a description selector for event ${chalk.red(event.name)}`,
+      );
+      return { success: false, events: eventSummaries, errorCount: 1 };
+    }
+
+    spinner.start(
+      `Retrieving event ${chalk.green(event.name)} ${chalk.yellow(event.date)}`,
+    );
+    const page = await browser.newPage();
+    await page.goto(event.detailLink as string, {
+      waitUntil: "networkidle2",
+    });
+
+    // Wait for the event container to load
+    await page.waitForSelector(selector.description, { timeout });
+
+    const description = await page.$eval(
+      selector.description,
+      (el: Element) => el.textContent?.trim(),
+      websiteConfig.selectors,
+    );
+
+    const descriptions: string[] = [];
+    if (description) {
+      descriptions.push(description);
+    }
+
+    // If the website has a lineup selector, we need to get the description
+    // for each artist in the lineup.
+    if (selector.lineup) {
+      const lineupLinks = await page.$$eval(selector.lineup, (elements) =>
+        elements.map((el) => el.getAttribute("href")),
+      );
+
+      for (const link of lineupLinks) {
+        if (!link || !selector.artistDescription) continue;
+
+        try {
+          await page.goto(link, { waitUntil: "networkidle2" });
+          await page.waitForSelector(selector.artistDescription, {
+            timeout,
+          });
+
+          const lineupDescription = await page.$eval(
+            selector.artistDescription,
+            (el: Element) => el.textContent?.trim(),
+          );
+
+          if (lineupDescription) {
+            descriptions.push(lineupDescription);
+          }
+        } catch (lineupError) {
+          errorCount++;
+          eventSummaries.errors = [
+            ...(eventSummaries.errors ?? []),
+            `Error fetching lineup description for event (${index}) ${event.name} on ${event.date} at ${link}: ${lineupError}`,
+          ];
+          spinner.fail(
+            `Error fetching lineup description for event ${chalk.red(event.name)} (see errors below)`,
+          );
+        }
+      }
+    }
+
+    if (descriptions.length > 0) {
+      event.relevance = determineShowRelevance(
+        band.genres,
+        descriptions.join("\n"),
+      );
+      spinner.info(
+        `Retrieved event ${chalk.green(event.name)} ${chalk.yellow(event.date)}`,
+      );
+      page.close();
+      return { success: true, events: eventSummaries, errorCount };
+    } else {
+      errorCount++;
+      const message = `No description found for event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}`;
+      eventSummaries.errors = [...(eventSummaries.errors ?? []), message];
+      event.errors = [...(event.errors ?? []), message];
+      spinner.fail(`No description found for event ${chalk.red(event.name)}`);
+      page.close();
+      return { success: false, events: eventSummaries, errorCount };
+    }
+  } catch (error) {
+    errorCount++;
+    eventSummaries.errors = [
+      ...(eventSummaries.errors ?? []),
+      `Error fetching event (${index}) ${event.name} on ${event.date} at ${event.detailLink ?? eventSummaries.url}: ${error}`,
+    ];
+    event.errors = [...(event.errors ?? []), String(error)];
+    spinner.fail(
+      `Error fetching event ${chalk.red(event.name)} (see errors below)`,
+    );
+    return { success: false, events: eventSummaries, errorCount };
+  }
+}
+
+export const DEFAULT_EVENT_FILTERS = [
+  /private event/i,
+  /cancelled/i,
+  /postponed/i,
+  /open mic/i,
+];
+
+/**
  * Determine the relevance of each event by checking the detail link. This will
  * populate the `relevance` field of each event. Only the first `limit` events
  * without a relevance score will be checked so as not to get rate limited. This
@@ -259,7 +415,7 @@ async function getEventDetails(
   /**
    * A list of strings to filter out events that are not relevant.
    */
-  filter = [/private event/i, /cancelled/i, /postponed/i],
+  filter: (string | RegExp)[] = DEFAULT_EVENT_FILTERS,
 ) {
   if (!eventSummaries.events?.length) {
     spinner.info(
@@ -286,7 +442,7 @@ async function getEventDetails(
   let errorCount = 0;
 
   spinner.info(
-    `Fetching details for events ${chalk.green(offset)} - ${chalk.green(end)} from ${chalk.yellow(eventSummaries.url)}`,
+    `Fetching details for events (${chalk.green(offset)} - ${chalk.green(end)}) / ${chalk.green(eventSummaries.events.length)} from ${chalk.yellow(eventSummaries.url)}`,
   );
 
   for (let index = offset; index < end; index++) {
@@ -297,116 +453,134 @@ async function getEventDetails(
     // data we already have.
     if (event.relevance) continue;
     // Skip any events that match our filter.
-    if (filter.some((f) => f.test(event.name || ""))) continue;
+    // if (testStringOrRegex(event.name || "", filter)) {
+    // if (filter.some((f) => f.test(event.name || ""))) {
+    if (filter.some((f) => testStringOrRegex(event.name || "", f))) {
+      // Mark this event as irrelevant
+      event.relevance = [];
+      continue;
+    }
 
     // If it's a two page selector, we need to load the detail page to get the
     // event description.
     if (isTwoPageSiteSelector(websiteConfig.selectors)) {
-      try {
-        // Find the selector for the given link.
-        const selector = websiteConfig.selectors.description.find((s) =>
-          event.detailLink?.includes(s.domain),
+      const { events: updatedEvents, errorCount: ec } =
+        await getEventDetailsFromPage(
+          browser,
+          band,
+          websiteConfig as TwoPageWebsiteConfig,
+          event,
+          eventSummaries,
+          index,
+          timeout,
         );
-
-        if (!selector) {
-          eventSummaries.errors = [
-            ...(eventSummaries.errors ?? []),
-            `Counld not find a description selector for event (${index}) ${event.name} on ${event.date} at ${event.detailLink}`,
-          ];
-          spinner.fail(
-            `Could not find a description selector for event ${chalk.red(event.name)}`,
-          );
-          continue;
-        }
-
-        spinner.start(`Retrieving event ${chalk.green(event.name)}`);
-        const page = await browser.newPage();
-        await page.goto(event.detailLink as string, {
-          waitUntil: "networkidle2",
-        });
-
-        // Wait for the event container to load
-        await page.waitForSelector(selector.description, { timeout });
-
-        const description = await page.$eval(
-          selector.description,
-          (el: Element) => el.textContent?.trim(),
-          websiteConfig.selectors,
-        );
-
-        const descriptions: string[] = [];
-        if (description) {
-          descriptions.push(description);
-        }
-
-        // If the website has a lineup selector, we need to get the description
-        // for each artist in the lineup.
-        if (selector.lineup) {
-          const lineupLinks = await page.$$eval(selector.lineup, (elements) =>
-            elements.map((el) => el.getAttribute("href")),
-          );
-
-          for (const link of lineupLinks) {
-            if (!link || !selector.artistDescription) continue;
-
-            try {
-              await page.goto(link, { waitUntil: "networkidle2" });
-              await page.waitForSelector(selector.artistDescription, {
-                timeout,
-              });
-
-              const lineupDescription = await page.$eval(
-                selector.artistDescription,
-                (el: Element) => el.textContent?.trim(),
-              );
-
-              if (lineupDescription) {
-                descriptions.push(lineupDescription);
-              }
-            } catch (lineupError) {
-              errorCount++;
-              eventSummaries.errors = [
-                ...(eventSummaries.errors ?? []),
-                `Error fetching lineup description for event (${index}) ${event.name} on ${event.date} at ${link}: ${lineupError}`,
-              ];
-              spinner.fail(
-                `Error fetching lineup description for event ${chalk.red(event.name)} (see errors below)`,
-              );
-            }
-          }
-        }
-
-        if (descriptions.length > 0) {
-          event.relevance = determineShowRelevance(
-            band.genres,
-            descriptions.join("\n"),
-          );
-          spinner.info(`Retrieved event ${chalk.green(event.name)}`);
-          page.close();
-          continue;
-        } else {
-          errorCount++;
-          const message = `No description found for event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}`;
-          eventSummaries.errors = [...(eventSummaries.errors ?? []), message];
-          event.errors = [...(event.errors ?? []), message];
-          spinner.fail(
-            `No description found for event ${chalk.red(event.name)}`,
-          );
-          page.close();
-          continue;
-        }
-      } catch (error) {
-        errorCount++;
-        eventSummaries.errors = [
-          ...(eventSummaries.errors ?? []),
-          `Error fetching event (${index}) ${event.name} on ${event.date} at ${event.detailLink ?? eventSummaries.url}: ${error}`,
-        ];
-        event.errors = [...(event.errors ?? []), String(error)];
-        spinner.fail(
-          `Error fetching event ${chalk.red(event.name)} (see errors below)`,
-        );
-        continue;
-      }
+      eventSummaries = updatedEvents;
+      errorCount += ec;
+      // try {
+      //   // Find the selector for the given link.
+      //   const selector = websiteConfig.selectors.description.find((s) =>
+      //     event.detailLink?.includes(s.domain),
+      //   );
+      //
+      //   if (!selector) {
+      //     eventSummaries.errors = [
+      //       ...(eventSummaries.errors ?? []),
+      //       `Counld not find a description selector for event (${index}) ${event.name} on ${event.date} at ${event.detailLink}`,
+      //     ];
+      //     spinner.fail(
+      //       `Could not find a description selector for event ${chalk.red(event.name)}`,
+      //     );
+      //     continue;
+      //   }
+      //
+      //   spinner.start(`Retrieving event ${chalk.green(event.name)}`);
+      //   const page = await browser.newPage();
+      //   await page.goto(event.detailLink as string, {
+      //     waitUntil: "networkidle2",
+      //   });
+      //
+      //   // Wait for the event container to load
+      //   await page.waitForSelector(selector.description, { timeout });
+      //
+      //   const description = await page.$eval(
+      //     selector.description,
+      //     (el: Element) => el.textContent?.trim(),
+      //     websiteConfig.selectors,
+      //   );
+      //
+      //   const descriptions: string[] = [];
+      //   if (description) {
+      //     descriptions.push(description);
+      //   }
+      //
+      //   // If the website has a lineup selector, we need to get the description
+      //   // for each artist in the lineup.
+      //   if (selector.lineup) {
+      //     const lineupLinks = await page.$$eval(selector.lineup, (elements) =>
+      //       elements.map((el) => el.getAttribute("href")),
+      //     );
+      //
+      //     for (const link of lineupLinks) {
+      //       if (!link || !selector.artistDescription) continue;
+      //
+      //       try {
+      //         await page.goto(link, { waitUntil: "networkidle2" });
+      //         await page.waitForSelector(selector.artistDescription, {
+      //           timeout,
+      //         });
+      //
+      //         const lineupDescription = await page.$eval(
+      //           selector.artistDescription,
+      //           (el: Element) => el.textContent?.trim(),
+      //         );
+      //
+      //         if (lineupDescription) {
+      //           descriptions.push(lineupDescription);
+      //         }
+      //       } catch (lineupError) {
+      //         errorCount++;
+      //         eventSummaries.errors = [
+      //           ...(eventSummaries.errors ?? []),
+      //           `Error fetching lineup description for event (${index}) ${event.name} on ${event.date} at ${link}: ${lineupError}`,
+      //         ];
+      //         spinner.fail(
+      //           `Error fetching lineup description for event ${chalk.red(event.name)} (see errors below)`,
+      //         );
+      //       }
+      //     }
+      //   }
+      //
+      //   if (descriptions.length > 0) {
+      //     event.relevance = determineShowRelevance(
+      //       band.genres,
+      //       descriptions.join("\n"),
+      //     );
+      //     spinner.info(`Retrieved event ${chalk.green(event.name)}`);
+      //     page.close();
+      //     continue;
+      //   } else {
+      //     errorCount++;
+      //     const message = `No description found for event (${index}) ${event.name} on ${event.date} at ${eventSummaries.url}`;
+      //     eventSummaries.errors = [...(eventSummaries.errors ?? []), message];
+      //     event.errors = [...(event.errors ?? []), message];
+      //     spinner.fail(
+      //       `No description found for event ${chalk.red(event.name)}`,
+      //     );
+      //     page.close();
+      //     continue;
+      //   }
+      // } catch (error) {
+      //   errorCount++;
+      //   eventSummaries.errors = [
+      //     ...(eventSummaries.errors ?? []),
+      //     `Error fetching event (${index}) ${event.name} on ${event.date} at ${event.detailLink ?? eventSummaries.url}: ${error}`,
+      //   ];
+      //   event.errors = [...(event.errors ?? []), String(error)];
+      //   spinner.fail(
+      //     `Error fetching event ${chalk.red(event.name)} (see errors below)`,
+      //   );
+      //   continue;
+      // }
     }
     // If we already have a description, then we have everything we need to
     // determine the event relevance.
@@ -446,7 +620,7 @@ export async function loadAllEventSummaries(
   for (const site of websiteConfigs) {
     const prev = previous.find((s) => s.url === site.url);
 
-    spinner.info(`Fetching events from: ${chalk.green(site.url)}`);
+    spinner.info(`Fetching events from: ${chalk.yellow(site.url)}`);
     const data = await getEventSummariesFromWebsite(
       browser,
       site,
@@ -454,7 +628,7 @@ export async function loadAllEventSummaries(
       prev,
     );
     sites.push(data);
-    spinner.succeed(`Finished fetching events from: ${chalk.green(site.url)}`);
+    spinner.succeed(`Finished fetching events from: ${chalk.yellow(site.url)}`);
   }
   // console.log(util.inspect(sites, { colors: true, depth: null }));
 
@@ -495,7 +669,10 @@ export async function getRelevanceForEvents(
       continue;
     }
 
-    const r = await getEventDetails(browser, c, site, band, limit, timeout);
+    const r = await getEventDetails(browser, c, site, band, limit, timeout, [
+      ...(band.filter ?? []),
+      ...DEFAULT_EVENT_FILTERS,
+    ]);
     detailCount += r.count;
   }
   spinner.succeed(`${chalk.green(detailCount)} Event details fetched`);

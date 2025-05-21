@@ -141,23 +141,6 @@ function determineNewEventsFound(
   if (debug)
     console.log(util.inspect(newEvents, { colors: true, depth: null }));
 
-  const relevantEvents = sitesToWrite.reduce((acc, site) => {
-    return [
-      ...(acc ?? []),
-      ...(site.events?.filter((e) => e.relevance?.length ?? 0) ?? []).map(
-        (e) => ({ ...e, url: site.url }),
-      ),
-    ];
-  }, [] as Event[]);
-
-  if (relevantEvents.length > 0) {
-    spinner.succeed(
-      `Found ${chalk.green(relevantEvents.length)} relevant events:`,
-    );
-    console.log(util.inspect(relevantEvents, { colors: true, depth: null }));
-  } else {
-    spinner.info("No relevant events found");
-  }
   return newEvents;
 }
 
@@ -259,6 +242,105 @@ export async function search(
   // date events.
   await saveEvents(sitesToWrite, file);
 
+  // Summerize the new results
+  printRelevantEvents(band, newEvents);
+
   // Return the new events so we can notify about them.
   return newEvents;
+}
+
+/**
+ * Console print the relevant events for a band.
+ */
+export function printRelevantEvents(
+  band: BandConfig,
+  eventsResults: EventsResult[],
+) {
+  const relevantEventCount = eventsResults.reduce((acc, site) => {
+    return (
+      acc + (site.events?.filter((e) => !!e.relevance?.length).length ?? 0)
+    );
+  }, 0);
+
+  if (relevantEventCount > 0) {
+    console.log(`Found ${chalk.green(relevantEventCount)} relevant events:`);
+  } else {
+    console.log("No relevant events found");
+  }
+
+  // Group and print events by website URL
+  for (const site of eventsResults) {
+    console.log(`Website: ${chalk.blue(site.url)}`);
+
+    if (!site.events || site.events.length === 0) {
+      console.log(chalk.yellow("  No events found for this website."));
+      continue;
+    }
+
+    const events = site.events.filter((e) => {
+      // Skip events that don't have a relevance value
+      if (!e.relevance?.length) return false;
+      // Skip events that match the band filter
+      if (band.filter) {
+        if (
+          band.filter.some((f) =>
+            typeof f === "string" ? e.name?.includes(f) : f.test(e.name || ""),
+          )
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    for (const event of events) {
+      console.log(`  Event: ${chalk.green(event.name || "Unknown")}`);
+      console.log(`    Date: ${chalk.cyan(event.date || "Unknown")}`);
+      if (event.detailLink) {
+        console.log(`    Detail Link: ${chalk.red(event.detailLink)}`);
+      }
+      if (event.relevance && event.relevance.length > 0) {
+        const highlightedRelevance = event.relevance.map((rel) => {
+          let highlighted = rel;
+          band.genres.forEach((genre) => {
+            const regex = new RegExp(genre, "gi");
+            highlighted = highlighted.replace(regex, chalk.bold.blue(genre));
+          });
+          return highlighted;
+        });
+        console.log(`    Relevance: ${highlightedRelevance.join("\n")}`);
+        // console.log(`    Relevance: \n${event.relevance.join("\n")}`);
+      }
+      console.log(""); // Add spacing between events
+    }
+  }
+}
+
+/**
+ * Print all relevant events from the specified file.
+ */
+export async function list(band: BandConfig, file: string) {
+  spinner.start("Reading previous gigs");
+
+  try {
+    // Read and parse the file
+    await access(file, constants.F_OK);
+    const data = await readFile(file, "utf-8");
+    const eventsResults: EventsResult[] = JSON.parse(data);
+
+    if (eventsResults.length === 0) {
+      spinner.warn("No events found in the file.");
+      return;
+    }
+
+    spinner.succeed(
+      `${chalk.green(countEvents(eventsResults))} previous gigs loaded`,
+    );
+
+    // Group and print events by website URL
+    printRelevantEvents(band, eventsResults);
+  } catch (error) {
+    console.error(chalk.red(`Error reading or parsing file: ${file}`));
+    console.error(error);
+  }
 }

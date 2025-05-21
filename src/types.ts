@@ -134,12 +134,23 @@ export interface WebsiteConfig {
 }
 
 /**
+ * A website config that specifically has a TwoPageSiteSelector.
+ */
+export type TwoPageWebsiteConfig = Omit<WebsiteConfig, "selectors"> & {
+  selectors: TwoPageSiteSelector;
+};
+
+/**
  * The minimal configuration for a band as defined in their config file.
  */
 export interface BandBaseConfiguration {
   name: string;
   genres: string[];
   sites: string[];
+  /**
+   * Ignore events that match these filters even if they have a relevance value.
+   */
+  filter?: (string | RegExp)[];
 }
 
 /**

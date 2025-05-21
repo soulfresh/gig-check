@@ -4,7 +4,7 @@
   "scripts": {
     "gig-check": "tsx src/index.ts",
     "gig-check:debug:warning": "echo 'Make sure to open the Chrome debugger first before running this command because the --inspect-brk flag does not work (for unknown reasons).'",
-    "gig-check:debug": "yarn gig-check:debug:warning && tsx --inspect src/index.ts --debug",
+    "search:moongold:debug": "yarn gig-check:debug:warning && tsx --inspect src/index.ts search moongold --debug",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
